@@ -41,8 +41,10 @@ from czarny_jacek.strategy import (
     bet_units,
     bust_chance,
     hand_total,
+    is_blackjack,
     play_by_advice,
     round_result,
+    your_hands,
 )
 from czarny_jacek.vision import (
     FELT_REGION,
@@ -160,7 +162,10 @@ def locate_game(log: Callable[[str], None]) -> dict | None:
     return None
 
 
-def hand_text(hand: list[str]) -> str:
+def hand_text(hand: list[str], split: bool = False) -> str:
+    # A two-card 21 after a split is a plain 21, not a blackjack.
+    if is_blackjack(hand) and not split:
+        return "BLACKJACK"
     total, soft = hand_total(hand)
     return f"{'miękkie ' if soft else ''}{total}"
 
@@ -356,7 +361,8 @@ class Overlay(QWidget):
             self.stat_labels[key].setStyleSheet(f"color: {color};")
             stats.addWidget(self.stat_labels[key])
         self.detail = QLabel(objectName="detail")
-        self.detail.setFixedHeight(34)
+        self.detail.setFixedHeight(68)
+        self.detail.setWordWrap(True)
         self.detail.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.note = QLabel(objectName="note")
         self.note.setFixedHeight(18)
@@ -396,6 +402,10 @@ class Overlay(QWidget):
         self.round_hidden: list[str] = []
         # Most of each rank visible at once this round: a higher number means the game just drew a card.
         self.round_visible = Counter()
+        # The true count the round's advice uses, fixed at the first advice: once told STÓJ, you stay told.
+        self.round_true_count: float | None = None
+        # Every card counted this round, in order, shown so you can check the count. Kept until the next round starts.
+        self.round_cards: list[str] = []
         self.last_felt_save = 0.0
         self.round_logged = False
         self.tally = {WIN: 0, BLACKJACK: 0, LOSS: 0, PUSH: 0}
@@ -449,27 +459,38 @@ class Overlay(QWidget):
             return [table.player[0] + self.round_hidden]
         return table.player
 
+    def decision_count(self) -> float:
+        if self.round_true_count is None:
+            self.round_true_count = self.shoe.true_count
+        return self.round_true_count
+
+    def your_cards(self, table: TableState) -> list[list[str]]:
+        if not table.dealer:
+            return self.full_hands(table)
+        return your_hands(self.full_hands(table), table.dealer[0], self.decision_count())
+
     def my_hands(self, table: TableState) -> list[tuple[list[str], bool, bool]]:
         """(your cards, doubled, finished) per hand, played exactly as advised: after STÓJ the hand
-        is scored as it was then, even if you or other players took more cards."""
+        is scored as it was then, even if other players took more cards or split it."""
         if not table.dealer:
             return []
-        return [play_by_advice(hand, table.dealer[0], self.shoe.true_count) for hand in self.full_hands(table) if len(hand) >= 2]
+        return [play_by_advice(hand, table.dealer[0], self.decision_count())
+                for hand in self.your_cards(table) if len(hand) >= 2]
 
     def advice(self, table: TableState) -> list[str]:
         """Only while you decide: the dealer shows one card and your hand (2+ cards) is not finished.
         With one card the answer is always "take another", so there is nothing to show."""
         if len(table.dealer) != 1:
             return []
-        return [advise(hand, table.dealer[0], self.shoe.true_count)
+        return [advise(hand, table.dealer[0], self.decision_count())
                 for hand, _, finished in self.my_hands(table) if not finished]
 
     def results(self, table: TableState) -> list[str]:
         """Your outcome per hand once it is decided, otherwise empty."""
         mine = self.my_hands(table)
-        if not mine or len(mine) != len(table.player):
+        if not mine or len(mine) != len(self.your_cards(table)):
             return []
-        split = len(table.player) > 1
+        split = len(mine) > 1
         outcomes = [round_result(hand, table.dealer, split) for hand, _, _ in mine]
         return [] if None in outcomes else outcomes
 
@@ -484,7 +505,8 @@ class Overlay(QWidget):
         for result in results:
             self.tally[result] += 1
         mine = self.my_hands(table)
-        hands = " | ".join(f"{' '.join(h)} ({hand_text(h)}{', podwojone' if doubled else ''}): {RESULT_NAMES[r]}"
+        split = len(mine) > 1
+        hands = " | ".join(f"{' '.join(h)} ({hand_text(h, split)}{', podwojone' if doubled else ''}): {RESULT_NAMES[r]}"
                            for (h, doubled, _), r in zip(mine, results))
         self.log(f"WYNIK RUNDY: krupier {' '.join(table.dealer)} ({hand_text(table.dealer)}) → Ty wg podpowiedzi: {hands}")
 
@@ -492,12 +514,16 @@ class Overlay(QWidget):
         game = np.array(self.screen.grab(self.game_rect))[:, :, :3]
         table = read_table(game, self.templates)
         visible = Counter(table.dealer + [rank for hand in table.player for rank in hand])
+        if visible and not self.round_visible:
+            self.round_cards = []
         new_ranks = self.tracker.update(list(visible.elements()))
+        self.round_cards += new_ranks
         self.hidden.drawn_digitally(list((visible - self.round_visible).elements()), time.monotonic())
         self.round_visible |= visible
         if not visible:
             self.round_visible = Counter()
             self.round_hidden = []
+            self.round_true_count = None
         self.track_shoe_color(shoe_color(game))
         betting = has_bet(game)
         if betting != self.betting and (table.dealer or table.player):
@@ -532,6 +558,7 @@ class Overlay(QWidget):
         for rank in self.hidden.take_hidden(now):
             self.shoe.see(rank)
             self.round_hidden.append(rank)
+            self.round_cards.append(rank)
             shoe = self.shoe
             self.log(f"Policzone ze stołu (gra jej nie pokazała): {rank} → RC {shoe.running_count:+d}, "
                      f"TC {shoe.true_count:+.1f}, widziane {shoe.cards_seen}")
@@ -562,7 +589,7 @@ class Overlay(QWidget):
         shoe = self.shoe
         moves = " / ".join(MOVE_NAMES[m] for m in self.advice(table))
         moves = moves or " / ".join(RESULT_NAMES[r] for r in self.results(table)) or "–"
-        player = " | ".join(f"{' '.join(h)} ({hand_text(h)})" for h in table.player) or "–"
+        player = " | ".join(f"{' '.join(h)} ({hand_text(h, len(table.player) > 1)})" for h in table.player) or "–"
         caption = [
             f"{datetime.now():%H:%M:%S}   Krupier: {' '.join(table.dealer) or '–'}   Gracz: {player}   Ruch: {moves}",
             f"RC {shoe.running_count:+d}   TC {shoe.true_count:+.1f}   widziane {shoe.cards_seen}   "
@@ -590,8 +617,9 @@ class Overlay(QWidget):
             text = "   ".join(f"{i}: {names[m]}" for i, m in enumerate(shown, 1))
             font_size, hint = 22, " ".join(f"{i}: {hints[m]}" for i, m in enumerate(shown, 1))
         elif self.my_hands(table) and all(finished for _, _, finished in self.my_hands(table)):
-            stood = " | ".join(f"{hand_text(h)}{' ×2' if doubled else ''}" for h, doubled, _ in self.my_hands(table))
-            text, font_size, hint = f"STOISZ: {stood}", 22, "Ruch krupiera"
+            mine = self.my_hands(table)
+            stood = " | ".join(f"{hand_text(h, len(mine) > 1)}{' ×2' if doubled else ''}" for h, doubled, _ in mine)
+            text, font_size, hint = (stood, 30, "Wypłata 3:2") if stood == "BLACKJACK" else (f"STOISZ: {stood}", 22, "Ruch krupiera")
         elif table.player or table.dealer:
             text, font_size, hint = "ROZDAJĄ…", 22, "Czekaj na 2 karty"
         else:
@@ -613,7 +641,9 @@ class Overlay(QWidget):
         self.bet_value.setText(f"×{bet_units(true_count)}")
 
         self.dealer_row.show_hand(table.dealer, hand_text(table.dealer) if table.dealer else "")
-        hands = self.full_hands(table) or [[]]
+        # Your cards as you played them, not the table's: after STÓJ others' hits and splits are not yours.
+        played = [hand for hand, _, _ in self.my_hands(table)]
+        hands = played if played and len(played) == len(self.your_cards(table)) else self.your_cards(table) or [[]]
         if len(hands) != len(self.player_rows):
             for row in self.player_rows:
                 row.setParent(None)  # Detach now; deleteLater alone leaves it on screen until the next event loop pass.
@@ -623,7 +653,7 @@ class Overlay(QWidget):
             for row in self.player_rows:
                 self.player_box.addWidget(row)
         for row, hand in zip(self.player_rows, hands):
-            total, risk = (hand_text(hand) if hand else ""), ""
+            total, risk = (hand_text(hand, len(hands) > 1) if hand else ""), ""
             if hand and hand_total(hand)[0] > 21:
                 risk = "FURA"
             elif hand and hand_total(hand)[0] < 21 and moves:  # Only while you still decide.
@@ -636,7 +666,8 @@ class Overlay(QWidget):
         self.stat_labels[WIN].setText(f"Wygrane {tally[WIN] + tally[BLACKJACK]}")
         self.stat_labels[LOSS].setText(f"Przegrane {tally[LOSS]}")
         self.stat_labels[PUSH].setText(f"Remisy {tally[PUSH]}")
-        details = [f"Talia {SHOE_COLOR_NAMES.get(self.shoe_color, '?')} · zostało {shoe.cards_left} kart"]
+        details = [f"Policzone w rundzie ({len(self.round_cards)}): {' '.join(self.round_cards) or '–'}",
+                   f"Talia {SHOE_COLOR_NAMES.get(self.shoe_color, '?')} · zostało {shoe.cards_left} kart"]
         if table.dealer[:1] == ["A"] and len(table.dealer) == 1:
             details.insert(0, f"Ubezpieczenie: {'TAK' if true_count >= INSURANCE_TRUE_COUNT else 'nie'}")
         self.detail.setText("\n".join(details))

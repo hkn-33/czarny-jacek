@@ -71,7 +71,7 @@ Step by step, including publishing a new version: [BUILDING.md](BUILDING.md).
 | Path | Contents |
 |---|---|
 | `czarny_jacek/` | vision (card reading), calibration (finds the game), shoe (count), strategy, main (control panel + overlay) |
-| `templates/` | digital rank glyphs, rectified felt cards, top-bar anchor |
+| `templates/` | digital rank glyphs, rectified felt cards, felt-text anchor for finding the game |
 | `tests/` | checks against the sample screenshots |
 | `docs/screenshots/` | images for this README |
 | `plan.md` | design notes, game facts and status |

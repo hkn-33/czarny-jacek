@@ -1,4 +1,4 @@
-"""Finds the game area on screen by locating the game top-bar buttons at any scale."""
+"""Finds the game area on screen by locating text printed on the table felt at any scale."""
 from pathlib import Path
 
 import cv2
@@ -6,14 +6,15 @@ import numpy as np
 
 from czarny_jacek.vision import GAME_WIDTH
 
-ANCHOR_PATH = Path(__file__).resolve().parent.parent / "templates" / "top_bar_anchor.png"
-# Anchor = "WIECEJ GIER" button + close X: right-aligned, unlike the title, which shifts with the player count.
+ANCHOR_PATH = Path(__file__).resolve().parent.parent / "templates" / "felt_anchor.png"
+# Anchor = "BLACKJACK PAYS 3 TO 2" on the felt. The top bar can't be the anchor: it keeps its size in full screen
+# while the table and cards grow (measured 1.17x), so the game area came out too small and shifted.
 # Position and game height are in the normalized game area (width GAME_WIDTH).
-ANCHOR_POSITION = (1218, 3)
+ANCHOR_POSITION = (830, 658)
 GAME_HEIGHT = 917
 MIN_ANCHOR_SCORE = 0.7
-# Game width from about 700 px (half of the reference) to 2250 px (4K screens).
-COARSE_SCALES = np.arange(0.5, 1.61, 0.05)
+# Game width from about 700 px (half of the reference) to 3500 px (full screen on 4K).
+COARSE_SCALES = np.arange(0.5, 2.51, 0.05)
 FINE_STEP = 0.005
 COARSE_DOWNSCALE = 0.5
 

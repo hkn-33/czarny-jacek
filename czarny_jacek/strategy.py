@@ -175,6 +175,19 @@ def play_by_advice(cards: list[str], dealer_up: str, true_count: float) -> tuple
     return hand, False, True
 
 
+def your_hands(table_hands: list[list[str]], dealer_up: str, true_count: float) -> list[list[str]]:
+    """Your hands' cards out of the table's. When the table splits a pair you were told not to split,
+    you keep the pair as one hand; the cards drawn to the split hands follow it in deal order."""
+    if len(table_hands) < 2:
+        return table_hands
+    pair = [hand[0] for hand in table_hands[:2]]
+    if advise(pair, dealer_up, true_count) == SPLIT:
+        return table_hands
+    later_cards = [card for hand in table_hands[:2] for card in hand[1:]]
+    later_cards += [card for hand in table_hands[2:] for card in hand]
+    return [pair + later_cards]
+
+
 def bet_units(true_count: float) -> int:
     """Player edge is roughly (TC - 1) * 0.5%; bet 1 unit until the edge turns positive."""
     return max(1, min(8, int(true_count)))
@@ -206,4 +219,9 @@ if __name__ == "__main__":
     assert play_by_advice(["10", "2", "K"], "9", 0) == (["10", "2", "K"], False, True)
     assert play_by_advice(["10", "2"], "9", 0) == (["10", "2"], False, False)
     assert play_by_advice(["6", "5", "3", "9"], "Q", 0) == (["6", "5", "3"], True, True)
+    # Live 21:03: you were told to stand on Q K, the table split anyway. You still hold Q K.
+    assert your_hands([["Q", "J"], ["K", "J"]], "9", 0) == [["Q", "K", "J", "J"]]
+    assert play_by_advice(your_hands([["Q", "6", "8"], ["10", "K"]], "J", 0)[0], "J", 0) == (["Q", "10"], False, True)
+    assert your_hands([["8", "3"], ["8", "K"]], "6", 0) == [["8", "3"], ["8", "K"]], "a split you were told to make"
+    assert your_hands([["10", "6", "K"]], "5", 0) == [["10", "6", "K"]]
     print("strategy ok")

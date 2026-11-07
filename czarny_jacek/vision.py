@@ -5,6 +5,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from czarny_jacek.strategy import card_value
+
 # Every image is scaled to this width before reading, so templates work on any screen.
 GAME_WIDTH = 1408
 # Real indexes score 0.9+; a badge-covered first card ~0.83, table text below 0.8.
@@ -20,6 +22,8 @@ SAME_HAND_GAP = 45
 
 # (x1, y1, x2, y2) in the normalized game area.
 DEALER_REGION = (250, 330, 700, 420)
+# Top-left of the dealer's first index; his next cards follow to the right in the same row (measured live).
+DEALER_FIRST_INDEX = (307, 364)
 PLAYER_REGION = (450, 640, 1150, 740)
 SHOE_BACK_REGION = (990, 480, 1040, 525)
 # Center of the main-bet circle: an empty gray ring when watching, a colored chip when you bet.
@@ -35,6 +39,9 @@ FELT_CARD_WIDTH, FELT_CARD_HEIGHT = 60, 42
 MIN_FELT_CARD_AREA = 800
 # Leave-one-out on the first captures: right ranks scored 0.87+, wrong ones at most 0.84.
 MIN_FELT_SCORE = 0.85
+# The best rank must beat every rank of another value by this much. A finger-covered J once scored
+# 0.88 as both J and 3; on 42 live cards (leave-one-card-out) this left no wrong value.
+MIN_FELT_MARGIN = 0.05
 # Corners are matched with this much slack (px) for an imprecise card outline.
 FELT_CORNER_SLACK = 3
 
@@ -113,12 +120,29 @@ def find_glyphs(gray: np.ndarray, templates: Templates) -> list[Glyph]:
         overlaps = any(abs(glyph.x - k.x) < SAME_GLYPH_DISTANCE and abs(glyph.y - k.y) < SAME_GLYPH_DISTANCE for k in kept)
         if not overlaps:
             kept.append(glyph)
-    if not kept:
-        return []
+    return kept
 
-    # The last card also shows an upside-down index in its bottom corner; only the top row is real.
-    top = min(g.y for g in kept)
-    return sorted((g for g in kept if g.y - top <= TOP_ROW_TOLERANCE), key=lambda g: g.x)
+
+def top_row(glyphs: list[Glyph]) -> list[Glyph]:
+    """The last card also shows an upside-down index in its bottom corner; only the top row is real."""
+    if not glyphs:
+        return []
+    top = min(g.y for g in glyphs)
+    return sorted((g for g in glyphs if g.y - top <= TOP_ROW_TOLERANCE), key=lambda g: g.x)
+
+
+def dealer_row(glyphs: list[Glyph]) -> list[Glyph]:
+    """The dealer's indexes: one row starting at his first card's fixed spot. A match elsewhere
+    (a J on the dealer's white shirt) is not a card; picked as the "top row" it hid his real cards."""
+    first_x, row_y = DEALER_FIRST_INDEX
+    row: list[Glyph] = []
+    for glyph in sorted(glyphs, key=lambda g: g.x):
+        if abs(glyph.y - row_y) > TOP_ROW_TOLERANCE:
+            continue
+        expected_x = row[-1].x if row else first_x
+        if abs(glyph.x - expected_x) < SAME_HAND_GAP:
+            row.append(glyph)
+    return row
 
 
 def group_hands(glyphs: list[Glyph]) -> list[list[str]]:
@@ -216,16 +240,30 @@ def read_felt_card(felt: np.ndarray, templates: FeltTemplates) -> tuple[str | No
     if card is None:
         return None
     corners = rank_corners(card)
-    score, rank = max((float(cv2.matchTemplate(corner, template, cv2.TM_CCOEFF_NORMED).max()), rank)
-                      for rank, template in templates for corner in corners)
-    return (rank if score >= MIN_FELT_SCORE else None), score
+    scores: dict[str, float] = {}
+    for rank, template in templates:
+        for corner in corners:
+            score = float(cv2.matchTemplate(corner, template, cv2.TM_CCOEFF_NORMED).max())
+            scores[rank] = max(scores.get(rank, -1.0), score)
+    return felt_rank(scores), max(scores.values())
+
+
+def felt_rank(scores: dict[str, float]) -> str | None:
+    """The best-scoring rank, or None when it is weak or a rank of another value is nearly as good.
+    Close calls among K, Q, J and 10 are fine: they are all worth 10."""
+    best = max(scores, key=scores.get)
+    other_values = [score for rank, score in scores.items() if card_value(rank) != card_value(best)]
+    runner_up = max(other_values, default=-1.0)
+    if scores[best] < MIN_FELT_SCORE or scores[best] - runner_up < MIN_FELT_MARGIN:
+        return None
+    return best
 
 
 def read_table(game_area: np.ndarray, templates: Templates) -> TableState:
     game = normalize(game_area)
     # The dealer never splits, so the small split-size templates would only add false matches there.
-    dealer_glyphs = read_region(game, DEALER_REGION, [t for t in templates if t[1] == 1.0])
-    player_glyphs = read_region(game, PLAYER_REGION, templates)
+    dealer_glyphs = dealer_row(read_region(game, DEALER_REGION, [t for t in templates if t[1] == 1.0]))
+    player_glyphs = top_row(read_region(game, PLAYER_REGION, templates))
     dealer = [g.rank for g in dealer_glyphs]
     return TableState(dealer, group_hands(player_glyphs), dealer_glyphs + player_glyphs)
 

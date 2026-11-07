@@ -6,7 +6,8 @@ import numpy as np
 
 from czarny_jacek.calibration import find_game_area
 from czarny_jacek.shoe import ROUND_END_FRAMES, RoundTracker, Shoe
-from czarny_jacek.vision import has_bet, load_felt_templates, load_image, load_templates, read_felt_card, read_table, shoe_color
+from czarny_jacek.vision import (Glyph, dealer_row, felt_rank, has_bet, load_felt_templates, load_image, load_templates,
+                                 read_felt_card, read_table, shoe_color)
 
 SAMPLES = Path(__file__).resolve().parent.parent / "samples"
 # Game area inside the author's 1920x1032 browser-window screenshots.
@@ -97,7 +98,29 @@ def test_reads_felt_cards() -> None:
         assert (reading and reading[0]) == rank, (stamp, reading)
 
 
+def test_dealer_row_ignores_shirt() -> None:
+    """Live 20:50:54: a J matched on the dealer's white shirt, above and right of his real 4, hid the 4."""
+    real_four = Glyph("4", 306, 364, 0.94)
+    shirt_j = Glyph("J", 608, 330, 0.88)
+    assert dealer_row([shirt_j, real_four]) == [real_four]
+    assert dealer_row([shirt_j]) == []
+    row = [Glyph(rank, x, 364, 0.95) for rank, x in (("4", 306), ("4", 334), ("2", 363), ("3", 392), ("9", 421))]
+    upside_down_index = Glyph("9", 440, 405, 0.9)
+    assert dealer_row(row + [upside_down_index, shirt_j]) == row
+
+
+def test_felt_rank_needs_clear_winner() -> None:
+    """Live 20:50:59: a finger-covered J of diamonds scored 0.88 as both 3 and J, and the 3 was counted."""
+    assert felt_rank({"3": 0.88, "J": 0.88, "7": 0.74}) is None
+    assert felt_rank({"7": 0.95, "2": 0.82}) == "7"
+    # K and 10 look alike on the felt, but both are worth 10, so a close call between them is fine.
+    assert felt_rank({"K": 0.93, "10": 0.91, "3": 0.6}) == "K"
+    assert felt_rank({"8": 0.76, "K": 0.71}) is None
+
+
 if __name__ == "__main__":
+    test_felt_rank_needs_clear_winner()
+    test_dealer_row_ignores_shirt()
     test_reads_cards()
     test_counts_five_rounds()
     test_finds_game_on_other_screen_sizes()
