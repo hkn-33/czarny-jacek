@@ -30,7 +30,11 @@ The overlay is hidden from screen capture, so it never confuses its own reading.
 
 ![Control panel](docs/screenshots/control-panel.png)
 
-## Run
+## Download
+
+Get `CzarnyJacek.exe` from the [Releases](../../releases) page and run it. No Python needed.
+
+## Run from source
 
 Requires Windows and Python 3.14.
 
@@ -48,14 +52,9 @@ Or double-click `uruchom.bat`.
 
 Joining mid-shoe is fine: earlier cards act like burn cards, only the true count is understated until the next shoe.
 
-## Build a single .exe
+## Build the .exe
 
-```
-.venv\Scripts\pip install pyinstaller
-.venv\Scripts\pyinstaller --noconfirm --onefile --windowed --name CzarnyJacek --paths . --add-data "templates;templates" czarny_jacek/main.py
-```
-
-Result: `dist/CzarnyJacek.exe` (~100 MB, no Python needed).
+Step by step, including publishing a new version: [BUILDING.md](BUILDING.md).
 
 ## Checks
 
