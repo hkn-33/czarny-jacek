@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+build/
+dist/
+*.spec
+
+# Screenshots from live play contain the casino session id, nicknames and balance.
+samples/
+captures/
+new_captures/
