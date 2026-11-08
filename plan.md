@@ -7,7 +7,7 @@ Goal: play mathematically optimally, i.e. lose as little as possible. Not "alway
 
 ## Status: v0.1
 
-Done: rank reading (template matching, all 13 ranks), Hi-Lo count with round dedupe, auto new-shoe on back color change, basic strategy + Illustrious 18, bust %, insurance, bet units, overlay window.
+Done: rank reading (template matching, all 13 ranks), Hi-Lo count with round dedupe, auto new-shoe on back color change, basic strategy + Illustrious 18, a one-line reason for each move, insurance, bet units, overlay window.
 Not yet: suits (needed for side bet EV), dealer outcome / EV per move, disconnect popup detection + sound, round CSV log, status bar reading.
 
 Run:
@@ -16,7 +16,7 @@ python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python -m czarny_jacek.main
 ```
-Or double-click `uruchom.bat` (keeps a console with the log). A control panel with a live log stays open (e.g. on a second monitor); "Uruchom Czarnego Jacka" finds the game automatically (template match of the top-bar "WIĘCEJ GIER" button at any scale) and opens the overlay. UI text is Polish.
+Or double-click `uruchom.bat` (keeps a console with the log). A control panel (log hidden behind "Pokaż log") stays open; "Uruchom" finds the game automatically (template match of the felt text "BLACKJACK PAYS 3 TO 2" at any scale) and opens the overlay in the game's bottom-left corner. UI text is Polish.
 Joining mid-shoe is fine: earlier cards act like burn cards, only the true count is understated until the next shoe.
 Checks: `python -m tests.test_samples`, `python -m czarny_jacek.strategy`.
 

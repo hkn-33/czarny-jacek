@@ -17,10 +17,11 @@ python -m venv .venv
 ```
 .venv\Scripts\python -m czarny_jacek.strategy
 .venv\Scripts\python -m czarny_jacek.shoe
+.venv\Scripts\python -m czarny_jacek.explain
 .venv\Scripts\python -m czarny_jacek.main
 ```
 
-The first two print `strategy ok` and `shoe ok`. The last one opens the app.
+The first three print `strategy ok`, `shoe ok` and `explain ok`. The last one opens the app.
 `.venv\Scripts\python -m tests.test_samples` also works if you have the private `samples/` folder.
 
 ## 3. Build the .exe

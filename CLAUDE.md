@@ -40,7 +40,7 @@ Everything written to the repo is in English: code, identifiers, comments, commi
 - In Node.js/TypeScript use async/await, never .then().
 - Apps with a UI: Nuxt + Tailwind CSS, always.
 ## Repo map
-- `czarny_jacek/` — app: vision (card reading), calibration (finds the game on screen), shoe (count), strategy, main (launcher + overlay)
+- `czarny_jacek/` — app: vision (card reading), calibration (finds the game on screen), shoe (count), strategy, explain (why a move), main (launcher + overlay)
 - `templates/` — `ranks/` digital card glyphs, `felt/` rectified physical cards (dealer's felt spot), `felt_anchor.png` (felt text) for finding the game
 - `samples/` — author's screenshots (contain casino session id, keep private)
 - `tests/` — checks against the samples

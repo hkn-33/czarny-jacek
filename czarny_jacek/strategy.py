@@ -1,5 +1,4 @@
 """Basic strategy (8 decks, dealer stands on soft 17, double after split) plus Illustrious 18 deviations."""
-from collections import Counter
 
 HIT, STAND, DOUBLE, SPLIT = "HIT", "STAND", "DOUBLE", "SPLIT"
 INSURANCE_TRUE_COUNT = 3
@@ -21,18 +20,6 @@ def hand_total(ranks: list[str]) -> tuple[int, bool]:
         total -= 10
         aces -= 1
     return total, aces > 0
-
-
-def bust_chance(ranks: list[str], remaining: Counter) -> float:
-    total, soft = hand_total(ranks)
-    if soft:
-        return 0.0
-    cards_left = sum(remaining.values())
-    if cards_left == 0:
-        return 0.0
-    # An ace counts as 1 here, so it never busts a hard hand below 21.
-    busting = sum(count for rank, count in remaining.items() if rank != "A" and card_value(rank) + total > 21)
-    return busting / cards_left
 
 
 # (hard total, dealer upcard value) -> (true count threshold, action at or above it, action below it)
@@ -205,8 +192,6 @@ if __name__ == "__main__":
     assert advise(["K", "Q"], "6", 3) == STAND
     assert hand_total(["A", "A", "9"]) == (21, True)
     assert hand_total(["A", "K", "5"]) == (16, False)
-    deck = Counter({"10": 4, "5": 4})
-    assert bust_chance(["10", "6"], deck) == 0.5
     assert round_result(["10", "6", "K"], ["5"], False) == LOSS
     assert round_result(["10", "7"], ["5"], False) is None
     assert round_result(["10", "7"], ["5", "10", "8"], False) == WIN

@@ -1,5 +1,7 @@
 ﻿"""Control panel finds the game on screen and shows a log; the overlay counts cards and shows the suggested move."""
 import ctypes
+import os
+import re
 import sys
 import time
 import traceback
@@ -16,9 +18,10 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
-    QGridLayout,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
@@ -26,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from czarny_jacek.calibration import find_game_area
+from czarny_jacek.explain import why
 from czarny_jacek.shoe import HiddenCards, RoundTracker, Shoe
 from czarny_jacek.strategy import (
     BLACKJACK,
@@ -39,7 +43,6 @@ from czarny_jacek.strategy import (
     STAND,
     advise,
     bet_units,
-    bust_chance,
     hand_total,
     is_blackjack,
     play_by_advice,
@@ -81,59 +84,73 @@ SWP_NOMOVE_NOSIZE_NOACTIVATE = 0x0002 | 0x0001 | 0x0010
 
 # UI text is Polish for the end user.
 MOVE_NAMES = {HIT: "DOBIERZ", STAND: "STÓJ", DOUBLE: "PODWÓJ", SPLIT: "ROZDZIEL"}
-MOVE_COLORS = {HIT: "#3d9bff", STAND: "#2ecc71", DOUBLE: "#ffa726", SPLIT: "#b07cff"}
-# Short on purpose: the reader is a casual player, not a card counter.
-MOVE_HINTS = {HIT: "Weź kartę", STAND: "Nie dobieraj", DOUBLE: "Podwój, jedna karta", SPLIT: "Rozdziel parę"}
 RESULT_NAMES = {WIN: "WYGRANA", BLACKJACK: "BLACKJACK!", LOSS: "PRZEGRANA", PUSH: "REMIS"}
-RESULT_COLORS = {WIN: "#2ecc71", BLACKJACK: "#2ecc71", LOSS: "#ff5c5c", PUSH: "#9aa0b4"}
-RESULT_HINTS = {WIN: "Gra wg podpowiedzi", BLACKJACK: "Płaci 3:2", LOSS: "Gra wg podpowiedzi", PUSH: "Zwrot stawki"}
-IDLE_COLOR = "#3a3f4f"
-# The overlay never changes size: a window that jumps while you read it is worse than a cut-off long hand.
-OVERLAY_WIDTH = 540
-ROW_HEIGHT = 40
+# One hue per answer, readable on dark glass over a busy video.
+MOVE_COLORS = {HIT: "#6cb4ff", STAND: "#4ade94", DOUBLE: "#fbbf3c", SPLIT: "#c79bff"}
+RESULT_COLORS = {WIN: "#4ade94", BLACKJACK: "#4ade94", LOSS: "#ff7a7a", PUSH: "#d6dae4"}
+IDLE_COLOR = "#8b92a5"
+POSITIVE, NEGATIVE, NEUTRAL = "#4ade94", "#ff7a7a", "#eef0f5"
+# Sizes below are for a game 1408 px wide; the overlay grows with the game (big screens, Windows scaling).
+# It never changes size while running: a window that jumps while you read it is worse than a cut-off long hand.
+OVERLAY_WIDTH = 316
+MAX_UI_SCALE = 2.5
 # Room for two hands (a split) below the dealer.
 PLAYER_ROWS_SHOWN = 2
+CARD_ROW_HEIGHT = 32
+# Counted cards that fit on one line; more are summed up as "+N".
+ROUND_CARDS_SHOWN = 12
+# Gap between the overlay and the game's bottom-left corner when it first appears.
+OVERLAY_MARGIN = 16
 SHOE_COLOR_NAMES = {"red": "czerwona", "blue": "niebieska"}
-POSITIVE, NEGATIVE, NEUTRAL = "#2ecc71", "#ff5c5c", "#f2f3f7"
+# The card backs' color in the shoe, shown as a swatch: a new shoe is a new color.
+SHOE_SWATCH_COLORS = {"red": "#e5484d", "blue": "#4c8dff"}
+UNKNOWN_SHOE_COLOR = "rgba(238, 240, 245, 60)"
+# How long the overlay flags a shoe swap.
+NEW_SHOE_BADGE_SECONDS = 90
+BAND_TEXT = "#0b0d12"
 
 OVERLAY_STYLE = """
-#card { background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1b1f2c, stop:1 #0f1118);
-        border: 1px solid #2c3244; border-radius: 22px; }
-QLabel { color: #f2f3f7; font-family: 'Segoe UI'; font-size: 14px; background: transparent; }
-#title { color: #8a90a6; font-size: 12px; font-weight: 800; letter-spacing: 3px; }
-#pill { color: #cfd3e0; background: #262b3b; border-radius: 10px; padding: 3px 10px; font-size: 11px; font-weight: 800; }
-#move { font-size: 40px; font-weight: 900; color: #0b0c10; border-radius: 16px; padding: 10px 18px; }
-#hint { color: #b9bdcc; font-size: 14px; font-weight: 600; qproperty-alignment: AlignCenter; }
-#tile { background: #1c2030; border: 1px solid #272c3d; border-radius: 14px; }
-#tileLabel { color: #9aa0b4; font-size: 12px; font-weight: 700; }
-#tileValue { font-size: 28px; font-weight: 800; }
-#tileHint { color: #6f7590; font-size: 11px; }
-#rowLabel { color: #8a90a6; font-size: 12px; font-weight: 800; letter-spacing: 1px; min-width: 70px; }
-#chip { background: #fbfbf7; color: #111; font-size: 20px; font-weight: 800; border-radius: 7px;
-        border-bottom: 3px solid #c8c8bd; padding: 2px 8px; min-width: 18px; qproperty-alignment: AlignCenter; }
-#total { font-size: 18px; font-weight: 800; }
-#risk { color: #9aa0b4; font-size: 13px; font-weight: 600; }
-#stat { background: #1c2030; border-radius: 10px; padding: 6px 4px; font-size: 13px; font-weight: 700;
-        qproperty-alignment: AlignCenter; }
-#detail { color: #6f7590; font-size: 12px; }
-#note { color: #ffa726; font-size: 12px; font-weight: 600; }
-QPushButton { color: #cfd3e0; background: #1c2030; border: 1px solid #2c3244; border-radius: 10px;
-              padding: 6px 14px; font-family: 'Segoe UI'; font-size: 13px; font-weight: 600; }
-QPushButton:hover { background: #262b3b; }
-QPushButton:checked { background: #1d3a5c; border-color: #3d9bff; }
-#close { padding: 4px 10px; }
-QToolTip { color: #f2f3f7; background: #1c2030; border: 1px solid #2c3244; padding: 6px; }
+#glass { background: rgba(11, 13, 18, 150); border: 1px solid rgba(255, 255, 255, 22); border-radius: 16px; }
+QLabel { color: #eef0f5; font-family: 'Segoe UI Variable Text', 'Segoe UI'; font-size: 13px; background: transparent; }
+#move { font-family: 'Segoe UI Variable Display', 'Segoe UI'; font-weight: 800; border-radius: 10px; }
+#situation { color: rgba(238, 240, 245, 215); font-size: 13px; }
+#side { color: rgba(238, 240, 245, 130); font-size: 11px; font-weight: 600; min-width: 46px; }
+#total { font-size: 15px; font-weight: 700; }
+#card { background: #f5f2ea; color: #15171c; font-size: 15px; font-weight: 800; border-radius: 4px;
+        min-width: 21px; max-width: 21px; min-height: 29px; max-height: 29px; qproperty-alignment: AlignCenter; }
+#miniCard { background: rgba(245, 242, 234, 215); color: #15171c; font-size: 10px; font-weight: 800; border-radius: 3px;
+            min-width: 14px; max-width: 14px; min-height: 19px; max-height: 19px; qproperty-alignment: AlignCenter; }
+#empty { color: rgba(238, 240, 245, 90); font-size: 13px; }
+#statLabel { color: rgba(238, 240, 245, 130); font-size: 11px; font-weight: 600; }
+#statValue { font-size: 15px; font-weight: 700; }
+#rule { background: rgba(255, 255, 255, 20); min-height: 1px; max-height: 1px; }
+#detail { color: rgba(238, 240, 245, 185); font-size: 12px; }
+#swatch { border-radius: 3px; min-width: 12px; max-width: 12px; min-height: 12px; max-height: 12px; }
+#badge { background: #fbbf3c; color: #0b0d12; font-size: 10px; font-weight: 800; border-radius: 4px; padding: 1px 6px; }
+QToolTip { color: #eef0f5; background: #171a21; border: 1px solid #2a2e38; padding: 6px; }
+QMenu { background: #171a21; color: #eef0f5; border: 1px solid #2a2e38; padding: 4px; font-family: 'Segoe UI'; font-size: 13px; }
+QMenu::item { padding: 6px 18px; border-radius: 6px; }
+QMenu::item:selected { background: #262a34; }
 """
 
 PANEL_STYLE = """
-QWidget { background: #12141b; color: #f2f3f7; font-family: 'Segoe UI'; font-size: 14px; }
-#steps { color: #b9bdcc; font-size: 14px; }
-#status { color: #ffa726; font-weight: 600; }
-QPushButton { background: #2ecc71; color: #0b0c10; border: none; border-radius: 10px; padding: 12px;
-              font-size: 16px; font-weight: 800; }
-QPushButton:hover { background: #3ddc80; }
-QPlainTextEdit { background: #0b0c10; color: #cfd3e0; border: 1px solid #2a2f3d; border-radius: 10px;
-                 font-family: Consolas; font-size: 12px; padding: 6px; }
+QWidget { background: #0f1115; color: #eef0f5; font-family: 'Segoe UI Variable Text', 'Segoe UI'; font-size: 14px; }
+#title { font-family: 'Segoe UI Variable Display', 'Segoe UI'; font-size: 28px; font-weight: 700; }
+#lead { color: #a3a9b8; font-size: 14px; }
+#stepNumber { background: #1d2028; color: #eef0f5; border-radius: 13px; font-size: 13px; font-weight: 700;
+              min-width: 26px; max-width: 26px; min-height: 26px; max-height: 26px; qproperty-alignment: AlignCenter; }
+#stepText { color: #d6dae4; padding-top: 3px; }
+#start { background: #4ade94; color: #0b1a12; border: none; border-radius: 10px; padding: 13px;
+         font-size: 15px; font-weight: 700; }
+#start:hover { background: #6ae8a8; }
+#start:pressed { background: #36c47e; }
+#status { color: #a3a9b8; font-size: 13px; }
+#status[state="error"] { color: #ff7a7a; }
+#status[state="ok"] { color: #4ade94; }
+#link { background: transparent; color: #a3a9b8; border: none; padding: 4px 0; font-size: 13px; text-align: left; }
+#link:hover { color: #eef0f5; }
+QPlainTextEdit { background: #090a0d; color: #a3a9b8; border: 1px solid #1d2028; border-radius: 10px;
+                 font-family: 'Cascadia Mono', Consolas; font-size: 12px; padding: 6px; }
 """
 
 
@@ -167,46 +184,85 @@ def hand_text(hand: list[str], split: bool = False) -> str:
     if is_blackjack(hand) and not split:
         return "BLACKJACK"
     total, soft = hand_total(hand)
+    if total > 21:
+        return "fura"
     return f"{'miękkie ' if soft else ''}{total}"
 
 
+STEPS = (
+    "Otwórz stół Total Casino All Bets Blackjack.",
+    "Włącz pełny ekran przeglądarki (F11), żeby cały stół był widoczny.",
+    "Kliknij Uruchom. Nakładka pojawi się w lewym dolnym rogu gry.",
+)
+
+
+def step_row(number: int, text: str) -> QHBoxLayout:
+    row = QHBoxLayout()
+    row.setSpacing(12)
+    row.addWidget(QLabel(str(number), objectName="stepNumber"), 0, Qt.AlignmentFlag.AlignTop)
+    row.addWidget(QLabel(text, objectName="stepText", wordWrap=True), 1, Qt.AlignmentFlag.AlignTop)
+    return row
+
+
 class ControlPanel(QWidget):
-    """Stays open (e.g. on a second monitor): start button and a live log."""
+    """Stays open (e.g. on a second monitor): start button, status, and a log hidden until asked for."""
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Czarny Jacek")
         self.setStyleSheet(PANEL_STYLE)
-        self.resize(720, 560)
+        self.setFixedWidth(480)
         self.overlay: Overlay | None = None
         self.session_dir = CAPTURES_DIR / f"{datetime.now():%Y%m%d-%H%M%S}"
         self.session_dir.mkdir(parents=True)
 
-        title = QLabel("Czarny Jacek")
-        title.setStyleSheet("font-size: 22px; font-weight: 800;")
-        steps = QLabel(
-            "1. Otwórz stół Total Casino All Bets Blackjack.\n"
-            "2. Ustaw przeglądarkę na pełny ekran (F11) – cały stół musi być widoczny.\n"
-            "3. Kliknij „Uruchom Czarnego Jacka”. Program sam znajdzie grę na ekranie.",
-            objectName="steps",
-        )
-        self.status = QLabel("", objectName="status")
-        start = QPushButton("Uruchom Czarnego Jacka")
+        title = QLabel("Czarny Jacek", objectName="title")
+        lead = QLabel("Podpowiada, kiedy dobrać, a kiedy stać, i liczy karty, żebyś wiedział, kiedy grać wyżej.",
+                      objectName="lead", wordWrap=True)
+        start = QPushButton("Uruchom", objectName="start", cursor=Qt.CursorShape.PointingHandCursor)
         start.clicked.connect(self.start)
+        self.status = QLabel("", objectName="status", wordWrap=True)
         self.log_box = QPlainTextEdit(readOnly=True)
         self.log_box.setMaximumBlockCount(2000)
-        folder = QLabel(f"Log i screeny: {self.session_dir}", objectName="steps")
-        folder.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.log_box.setFixedHeight(200)
+        self.log_box.hide()
+        self.log_toggle = QPushButton("Pokaż log", objectName="link", cursor=Qt.CursorShape.PointingHandCursor)
+        self.log_toggle.clicked.connect(self.toggle_log)
+        folder = QPushButton("Otwórz folder z logami i zrzutami", objectName="link",
+                             cursor=Qt.CursorShape.PointingHandCursor)
+        folder.clicked.connect(lambda: os.startfile(self.session_dir))
+        links = QHBoxLayout()
+        links.addWidget(self.log_toggle)
+        links.addStretch()
+        links.addWidget(folder)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 16)
-        layout.setSpacing(10)
+        layout.setContentsMargins(28, 26, 28, 22)
+        layout.setSpacing(0)
         layout.addWidget(title)
-        layout.addWidget(steps)
+        layout.addSpacing(6)
+        layout.addWidget(lead)
+        layout.addSpacing(24)
+        for number, text in enumerate(STEPS, 1):
+            layout.addLayout(step_row(number, text))
+            layout.addSpacing(12)
+        layout.addSpacing(12)
         layout.addWidget(start)
+        layout.addSpacing(10)
         layout.addWidget(self.status)
+        layout.addSpacing(14)
+        layout.addLayout(links)
         layout.addWidget(self.log_box)
-        layout.addWidget(folder)
+
+    def toggle_log(self) -> None:
+        self.log_box.setVisible(not self.log_box.isVisible())
+        self.log_toggle.setText("Ukryj log" if self.log_box.isVisible() else "Pokaż log")
+        self.adjustSize()
+
+    def show_status(self, text: str, state: str) -> None:
+        self.status.setText(text)
+        self.status.setProperty("state", state)
+        self.status.style().polish(self.status)
 
     def log(self, message: str) -> None:
         line = f"{datetime.now():%H:%M:%S} {message}"
@@ -231,13 +287,14 @@ class ControlPanel(QWidget):
         self.activateWindow()
 
     def start(self) -> None:
-        self.status.setText("Szukam gry na ekranie…")
+        self.show_status("Szukam gry na ekranie…", "busy")
         QApplication.processEvents()
         rect = locate_game(self.log)
         if rect is None:
-            self.status.setText("Nie znaleziono gry. Sprawdź, czy stół jest widoczny na pełnym ekranie, i spróbuj ponownie.")
+            self.show_status("Nie widzę stołu. Sprawdź, czy gra jest na pełnym ekranie i nic jej nie zasłania, "
+                             "potem kliknij Uruchom jeszcze raz.", "error")
             return
-        self.status.setText("Działa. Nakładkę możesz przesunąć myszką.")
+        self.show_status("Działa. Nakładkę przesuniesz myszką, prawy klik otwiera menu.", "ok")
         if self.overlay is None:
             self.overlay = Overlay(rect, self.log, self.session_dir)
             self.overlay.show()
@@ -245,53 +302,58 @@ class ControlPanel(QWidget):
             self.overlay.game_rect = rect
 
 
-def tile(label: str, hint: str, tooltip: str) -> tuple[QFrame, QLabel]:
-    frame = QFrame(objectName="tile")
-    frame.setToolTip(tooltip)
-    value = QLabel("–", objectName="tileValue")
-    layout = QVBoxLayout(frame)
-    layout.setContentsMargins(12, 8, 12, 8)
-    layout.setSpacing(0)
-    layout.addWidget(QLabel(label, objectName="tileLabel"))
-    layout.addWidget(value)
-    layout.addWidget(QLabel(hint, objectName="tileHint"))
-    return frame, value
+def to_logical(x: int, y: int) -> tuple[QPoint, float]:
+    """A screen point in physical pixels (as mss sees it) in Qt's coordinates, plus that screen's scaling.
+    Qt keeps each screen's top-left in physical pixels but measures inside it in scaled (logical) pixels."""
+    for screen in QApplication.screens():
+        origin, ratio = screen.geometry().topLeft(), screen.devicePixelRatio()
+        size = screen.geometry().size() * ratio
+        if origin.x() <= x < origin.x() + size.width() and origin.y() <= y < origin.y() + size.height():
+            return QPoint(round(origin.x() + (x - origin.x()) / ratio), round(origin.y() + (y - origin.y()) / ratio)), ratio
+    return QPoint(x, y), 1.0
+
+
+def scaled_style(style: str, scale: float) -> str:
+    return re.sub(r"(\d+)px", lambda match: f"{round(int(match.group(1)) * scale)}px", style)
+
+
+def clear_layout(layout: QHBoxLayout) -> None:
+    while layout.count():
+        widget = layout.takeAt(0).widget()
+        if widget:
+            widget.setParent(None)  # Detach now; deleteLater alone leaves it on screen until the next event loop pass.
+            widget.deleteLater()
 
 
 class CardRow(QWidget):
-    """Label + white card chips + total, e.g. "TY  [2][10]  12  ryzyko fury 31%". One row per hand."""
+    """Side label + card faces + total, e.g. "ty  [10][6]  16". One row per hand."""
 
-    def __init__(self, label: str) -> None:
+    def __init__(self, side: str, height: int) -> None:
         super().__init__()
-        self.setFixedHeight(ROW_HEIGHT)
-        self.layout_ = QHBoxLayout(self)
-        self.layout_.setContentsMargins(0, 0, 0, 0)
-        self.layout_.setSpacing(5)
-        self.layout_.addWidget(QLabel(label, objectName="rowLabel"))
-        self.chips = QHBoxLayout()
-        self.chips.setSpacing(4)
-        self.layout_.addLayout(self.chips)
+        self.setFixedHeight(height)
+        self.shown_hand: list[str] | None = None
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(QLabel(side, objectName="side"))
+        self.cards = QHBoxLayout()
+        self.cards.setSpacing(3)
+        layout.addLayout(self.cards)
+        layout.addStretch()
         self.total = QLabel(objectName="total")
-        self.risk = QLabel(objectName="risk")
-        self.layout_.addSpacing(8)
-        self.layout_.addWidget(self.total)
-        self.layout_.addSpacing(6)
-        self.layout_.addWidget(self.risk)
-        self.layout_.addStretch()
+        layout.addWidget(self.total)
 
-    def show_hand(self, hand: list[str], total: str, risk: str = "") -> None:
+    def show_hand(self, hand: list[str], total: str) -> None:
         self.total.setText(total)
-        self.risk.setText(risk)
-        # Rebuilding chips at 5 fps would flicker; only rebuild when the cards change.
-        if hand == getattr(self, "shown_hand", None):
+        # Rebuilding cards at 5 fps would flicker; only rebuild when they change.
+        if hand == self.shown_hand:
             return
         self.shown_hand = hand
-        while self.chips.count():
-            self.chips.takeAt(0).widget().deleteLater()
+        clear_layout(self.cards)
         for rank in hand:
-            self.chips.addWidget(QLabel(rank, objectName="chip"))
+            self.cards.addWidget(QLabel(rank, objectName="card"))
         if not hand:
-            self.chips.addWidget(QLabel("–", objectName="detail"))
+            self.cards.addWidget(QLabel("–", objectName="empty"))
 
 
 class Overlay(QWidget):
@@ -302,91 +364,104 @@ class Overlay(QWidget):
         self.last_table: tuple | None = None
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setStyleSheet(OVERLAY_STYLE)
+        corner, ratio = to_logical(rect["left"], rect["top"] + rect["height"])
+        self.scale = min(max(rect["width"] / ratio / GAME_WIDTH, 1.0), MAX_UI_SCALE)
+        self.style_sheet = scaled_style(OVERLAY_STYLE, self.scale)
+        self.setStyleSheet(self.style_sheet)
         self.drag_start: QPoint | None = None
+        px = self.px
 
-        self.card = QFrame(objectName="card")
+        glass = QFrame(objectName="glass")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(self.card)
+        outer.addWidget(glass)
+        self.setToolTip("Przeciągnij, aby przesunąć. Prawy klik: nowa talia, zamknij.")
 
-        self.pin = QPushButton("📌", checkable=True, checked=True, toolTip="Zawsze na wierzchu")
-        self.pin.toggled.connect(self.apply_topmost)
-        close = QPushButton("✕", objectName="close", toolTip="Zamknij")
-        close.clicked.connect(QApplication.quit)
-        self.mode_pill = QLabel(objectName="pill")
-        header = QHBoxLayout()
-        header.addWidget(QLabel("CZARNY JACEK", objectName="title"))
-        header.addSpacing(6)
-        header.addWidget(self.mode_pill)
-        header.addStretch()
-        header.addWidget(self.pin)
-        header.addWidget(close)
+        self.move_label = QLabel(objectName="move", alignment=Qt.AlignmentFlag.AlignCenter)
+        self.move_label.setFixedHeight(px(52))
+        self.move_label.setGraphicsEffect(
+            QGraphicsDropShadowEffect(blurRadius=px(16), offset=QPoint(0, px(2)), color=QColor(0, 0, 0, 150)))
+        self.situation = QLabel(objectName="situation", wordWrap=True,
+                                alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        # Two lines always reserved, so a longer reason does not push the cards down.
+        self.situation.setFixedHeight(px(36))
 
-        self.move_label = QLabel(objectName="move")
-        self.move_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.move_label.setFixedHeight(78)
-        self.hint = QLabel(objectName="hint")
-        self.hint.setFixedHeight(22)
-
-        tiles = QGridLayout()
-        tiles.setSpacing(8)
-        tc_tile, self.tc_value = tile(
-            "Przewaga", "plus = dla Ciebie",
-            "Kto ma przewagę w tej talii. Od +1 w górę Ty, poniżej 0 kasyno.")
-        rc_tile, self.rc_value = tile(
-            "Licznik kart", "małe minus duże",
-            "Ile małych kart (2–6) wyszło więcej niż dużych (10, J, Q, K, A).\n"
-            "Dużo małych za nami = więcej dużych w talii = dobrze dla Ciebie.")
-        bet_tile, self.bet_value = tile(
-            "Stawka", "× najmniejsza",
-            "Ile razy Twoją najmniejszą stawkę postawić. Rośnie tylko przy przewadze.")
-        tiles.addWidget(tc_tile, 0, 0)
-        tiles.addWidget(rc_tile, 0, 1)
-        tiles.addWidget(bet_tile, 0, 2)
-
-        self.dealer_row = CardRow("KRUPIER")
+        self.dealer_row = CardRow("krupier", px(CARD_ROW_HEIGHT))
         player_area = QWidget()
-        player_area.setFixedHeight(PLAYER_ROWS_SHOWN * ROW_HEIGHT + 6)
+        player_area.setFixedHeight(PLAYER_ROWS_SHOWN * px(CARD_ROW_HEIGHT) + px(4))
         self.player_box = QVBoxLayout(player_area)
         self.player_box.setContentsMargins(0, 0, 0, 0)
-        self.player_box.setSpacing(6)
+        self.player_box.setSpacing(px(4))
         self.player_box.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.player_rows: list[CardRow] = []
-        stats = QHBoxLayout()
-        stats.setSpacing(6)
-        self.stat_labels = {}
-        for key, color in ((WIN, POSITIVE), (LOSS, NEGATIVE), (PUSH, NEUTRAL)):
-            self.stat_labels[key] = QLabel(objectName="stat")
-            self.stat_labels[key].setStyleSheet(f"color: {color};")
-            stats.addWidget(self.stat_labels[key])
-        self.detail = QLabel(objectName="detail")
-        self.detail.setFixedHeight(68)
-        self.detail.setWordWrap(True)
-        self.detail.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.note = QLabel(objectName="note")
-        self.note.setFixedHeight(18)
-        new_shoe = QPushButton("Nowa talia", toolTip="Krupier wymienił karty: licz od zera")
-        new_shoe.clicked.connect(self.new_shoe)
 
-        layout = QVBoxLayout(self.card)
-        layout.setContentsMargins(18, 14, 18, 16)
-        layout.setSpacing(10)
-        layout.addLayout(header)
+        rule = QFrame(objectName="rule")
+        self.edge_value = QLabel(objectName="statValue")
+        self.bet_value = QLabel(objectName="statValue")
+        edge = QLabel("przewaga", objectName="statLabel")
+        edge.setToolTip("Kto ma przewagę w tej talii. Od +1 w górę Ty, poniżej zera kasyno.")
+        bet = QLabel("stawka", objectName="statLabel")
+        bet.setToolTip("Ile razy postawić najmniejszą stawkę. Rośnie tylko przy przewadze.")
+        stats = QHBoxLayout()
+        stats.setSpacing(px(6))
+        stats.addWidget(edge)
+        stats.addWidget(self.edge_value)
+        stats.addSpacing(px(14))
+        stats.addWidget(bet)
+        stats.addWidget(self.bet_value)
+        stats.addStretch()
+
+        round_label = QLabel("w rundzie", objectName="statLabel")
+        round_label.setToolTip("Karty policzone w tej rundzie, w kolejności. Porównaj je ze stołem.")
+        self.round_box = QHBoxLayout()
+        self.round_box.setSpacing(px(2))
+        self.shown_round_cards: list[str] | None = None
+        round_row = QHBoxLayout()
+        round_row.setSpacing(px(8))
+        round_row.addWidget(round_label)
+        round_row.addLayout(self.round_box)
+        round_row.addStretch()
+
+        self.shoe_swatch = QLabel(objectName="swatch")
+        self.shoe_swatch.setToolTip("Kolor rewersów w bucie. Nowy kolor = nowy but, licznik od zera.")
+        self.cards_left = QLabel(objectName="detail")
+        self.cards_left.setToolTip("Ile kart zostało w bucie.")
+        self.new_shoe_badge = QLabel("NOWY BUT", objectName="badge")
+        self.tally_text = QLabel(objectName="statValue")
+        self.tally_text.setToolTip("Dziś: wygrane / przegrane / remisy, gdybyś grał dokładnie wg podpowiedzi.")
+        shoe_row = QHBoxLayout()
+        shoe_row.setSpacing(px(6))
+        shoe_row.addWidget(self.shoe_swatch)
+        shoe_row.addWidget(self.cards_left)
+        shoe_row.addWidget(self.new_shoe_badge)
+        shoe_row.addStretch()
+        shoe_row.addWidget(self.tally_text)
+
+        layout = QVBoxLayout(glass)
+        layout.setContentsMargins(px(14), px(12), px(14), px(12))
+        layout.setSpacing(0)
         layout.addWidget(self.move_label)
-        layout.addWidget(self.hint)
-        layout.addLayout(tiles)
+        layout.addSpacing(px(8))
+        layout.addWidget(self.situation)
+        layout.addSpacing(px(6))
         layout.addWidget(self.dealer_row)
+        layout.addSpacing(px(4))
         layout.addWidget(player_area)
+        layout.addSpacing(px(6))
+        layout.addWidget(rule)
+        layout.addSpacing(px(8))
         layout.addLayout(stats)
-        layout.addWidget(self.detail)
-        layout.addWidget(self.note)
-        layout.addWidget(new_shoe)
-        self.setFixedWidth(OVERLAY_WIDTH)
+        layout.addSpacing(px(6))
+        layout.addLayout(round_row)
+        layout.addSpacing(px(6))
+        layout.addLayout(shoe_row)
+        self.setFixedWidth(px(OVERLAY_WIDTH))
 
         self.game_rect = rect
         self.templates = load_templates()
         self.screen = mss.MSS()
+        self.shoe_changed_at: float | None = None
+        self.tally = {WIN: 0, BLACKJACK: 0, LOSS: 0, PUSH: 0}
         self.new_shoe()
         # Joined mid-shoe: cards dealt before are unknown, like burn cards. The count still works,
         # but the true count is understated because we assume a full shoe.
@@ -408,10 +483,10 @@ class Overlay(QWidget):
         self.round_cards: list[str] = []
         self.last_felt_save = 0.0
         self.round_logged = False
-        self.tally = {WIN: 0, BLACKJACK: 0, LOSS: 0, PUSH: 0}
         self.render(TableState([], []))
         self.adjustSize()
         self.setFixedSize(self.size())
+        self.move(corner.x() + self.px(OVERLAY_MARGIN), corner.y() - self.height() - self.px(OVERLAY_MARGIN))
 
         timer = QTimer(self)
         timer.timeout.connect(self.tick)
@@ -427,12 +502,12 @@ class Overlay(QWidget):
 
     def apply_topmost(self) -> None:
         # Re-asserted every frame: a full-screen browser that gets a click can push itself above us.
-        order = HWND_TOPMOST if self.pin.isChecked() else HWND_NOTOPMOST
-        ctypes.windll.user32.SetWindowPos(int(self.winId()), order, 0, 0, 0, 0, SWP_NOMOVE_NOSIZE_NOACTIVATE)
+        ctypes.windll.user32.SetWindowPos(int(self.winId()), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE_NOSIZE_NOACTIVATE)
 
     def new_shoe(self) -> None:
         if hasattr(self, "shoe"):
             self.log("=== NOWY BUT – licznik od zera ===")
+            self.shoe_changed_at = time.monotonic()
         self.shoe = Shoe()
         self.tracker = RoundTracker(self.shoe)
         self.started_mid_shoe = False
@@ -543,8 +618,7 @@ class Overlay(QWidget):
             self.log(f"Policzone: {' '.join(new_ranks)} → RC {shoe.running_count:+d}, TC {shoe.true_count:+.1f}, widziane {shoe.cards_seen}")
 
         self.render(table)
-        if self.pin.isChecked():
-            self.apply_topmost()
+        self.apply_topmost()
 
     def felt_tick(self) -> None:
         felt = self.grab_felt()
@@ -601,44 +675,53 @@ class Overlay(QWidget):
         cv2.imwrite(str(self.session_dir / f"{stamp}_opis.png"), draw_debug(game, table, caption), options)
         return stamp
 
-    def render(self, table: TableState) -> None:
-        shoe = self.shoe
-        moves = self.advice(table)
-        results = self.results(table)
-        if moves:
-            names, colors, hints, shown = MOVE_NAMES, MOVE_COLORS, MOVE_HINTS, moves
-        elif results:
-            names, colors, hints, shown = RESULT_NAMES, RESULT_COLORS, RESULT_HINTS, results
-        else:
-            shown = []
-        if len(shown) == 1:
-            text, font_size, hint = names[shown[0]], 38, hints[shown[0]]
-        elif shown:
-            text = "   ".join(f"{i}: {names[m]}" for i, m in enumerate(shown, 1))
-            font_size, hint = 22, " ".join(f"{i}: {hints[m]}" for i, m in enumerate(shown, 1))
-        elif self.my_hands(table) and all(finished for _, _, finished in self.my_hands(table)):
-            mine = self.my_hands(table)
-            stood = " | ".join(f"{hand_text(h, len(mine) > 1)}{' ×2' if doubled else ''}" for h, doubled, _ in mine)
-            text, font_size, hint = (stood, 30, "Wypłata 3:2") if stood == "BLACKJACK" else (f"STOISZ: {stood}", 22, "Ruch krupiera")
-        elif table.player or table.dealer:
-            text, font_size, hint = "ROZDAJĄ…", 22, "Czekaj na 2 karty"
-        else:
-            text, font_size, hint = "CZEKAM", 22, "Nowa runda wkrótce"
-        color = colors[shown[0]] if shown else IDLE_COLOR
-        self.move_label.setText(text)
-        top, bottom = QColor(color).lighter(115).name(), QColor(color).darker(115).name()
-        self.move_label.setStyleSheet(
-            f"background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {top}, stop:1 {bottom});"
-            f" color: {'#0b0c10' if shown else '#c9cddb'}; font-size: {font_size}px;")
-        self.hint.setText(hint)
-        self.card.setStyleSheet(f"#card {{ border-color: {color if shown else '#2c3244'}; }}")
+    def px(self, size: float) -> int:
+        return round(size * self.scale)
 
-        true_count = shoe.true_count
-        tc_color = POSITIVE if true_count >= 1 else NEGATIVE if true_count <= -1 else NEUTRAL
-        self.tc_value.setText(f"{true_count:+.1f}")
-        self.tc_value.setStyleSheet(f"color: {tc_color};")
-        self.rc_value.setText(f"{shoe.running_count:+d}")
-        self.bet_value.setText(f"×{bet_units(true_count)}")
+    def headline(self, table: TableState) -> tuple[str, str | None, str]:
+        """(big text, band color or None for a quiet state, the line under it) for this moment of the round."""
+        moves = self.advice(table)
+        mine = self.my_hands(table)
+        split = len(mine) > 1
+        if moves:
+            dealer_up = table.dealer[0]
+            deciding = [hand for hand, _, finished in mine if not finished]
+            reason = why(deciding[0], dealer_up, self.decision_count())
+            if split:
+                reason = f"Ręka {1 + [h for h, _, _ in mine].index(deciding[0])}: {reason}"
+            if dealer_up == "A":
+                reason += f" Ubezpieczenie: {'TAK' if self.shoe.true_count >= INSURANCE_TRUE_COUNT else 'nie'}."
+            if len(moves) == 1:
+                return MOVE_NAMES[moves[0]], MOVE_COLORS[moves[0]], reason
+            return "  ".join(f"{i}: {MOVE_NAMES[m]}" for i, m in enumerate(moves, 1)), MOVE_COLORS[moves[0]], reason
+        results = self.results(table)
+        if results:
+            yours = " · ".join(hand_text(hand, split) for hand, _, _ in mine)
+            situation = f"Krupier {hand_text(table.dealer)}, Ty {yours}."
+            if len(results) == 1:
+                return RESULT_NAMES[results[0]], RESULT_COLORS[results[0]], situation
+            return "  ".join(f"{i}: {RESULT_NAMES[r]}" for i, r in enumerate(results, 1)), RESULT_COLORS[results[0]], situation
+        if mine and all(finished for _, _, finished in mine):
+            stood = " · ".join(f"{hand_text(hand, split)}{' ×2' if doubled else ''}" for hand, doubled, _ in mine)
+            if stood == "BLACKJACK":
+                return "BLACKJACK!", RESULT_COLORS[BLACKJACK], "Wypłata 3:2, chyba że krupier też ma blackjacka."
+            if len(table.dealer) == 1 and not split:
+                # Still your turn at the table: say the move and why, not just the state.
+                return MOVE_NAMES[STAND], MOVE_COLORS[STAND], why(mine[0][0], table.dealer[0], self.decision_count())
+            return "STOISZ", None, f"Masz {stood}. Dobiera krupier."
+        if table.player or table.dealer:
+            return "ROZDAJĄ", None, ""
+        return "CZEKAM", None, ""
+
+    def render(self, table: TableState) -> None:
+        text, band, situation = self.headline(table)
+        self.move_label.setText(text)
+        if band:
+            font_size = 34 if len(text) <= 11 else 20
+            self.move_label.setStyleSheet(f"background: {band}; color: {BAND_TEXT}; font-size: {self.px(font_size)}px;")
+        else:
+            self.move_label.setStyleSheet(f"background: transparent; color: {IDLE_COLOR}; font-size: {self.px(26)}px;")
+        self.situation.setText(situation)
 
         self.dealer_row.show_hand(table.dealer, hand_text(table.dealer) if table.dealer else "")
         # Your cards as you played them, not the table's: after STÓJ others' hits and splits are not yours.
@@ -648,31 +731,56 @@ class Overlay(QWidget):
             for row in self.player_rows:
                 row.setParent(None)  # Detach now; deleteLater alone leaves it on screen until the next event loop pass.
                 row.deleteLater()
-            labels = ["TY"] if len(hands) == 1 else [f"RĘKA {i}" for i in range(1, len(hands) + 1)]
-            self.player_rows = [CardRow(label) for label in labels]
+            sides = ["ty"] if len(hands) == 1 else [f"ręka {i}" for i in range(1, len(hands) + 1)]
+            self.player_rows = [CardRow(side, self.px(CARD_ROW_HEIGHT)) for side in sides]
             for row in self.player_rows:
                 self.player_box.addWidget(row)
         for row, hand in zip(self.player_rows, hands):
-            total, risk = (hand_text(hand, len(hands) > 1) if hand else ""), ""
-            if hand and hand_total(hand)[0] > 21:
-                risk = "FURA"
-            elif hand and hand_total(hand)[0] < 21 and moves:  # Only while you still decide.
-                risk = f"ryzyko fury {bust_chance(hand, shoe.remaining):.0%}"
-            row.show_hand(hand, total, risk)
+            row.show_hand(hand, hand_text(hand, len(hands) > 1) if hand else "")
 
+        true_count = self.shoe.true_count
+        edge_color = POSITIVE if true_count >= 1 else NEGATIVE if true_count <= -1 else NEUTRAL
+        # Joined mid-shoe: the true count is understated, so it is shown as approximate.
+        approximate = "≈ " if self.started_mid_shoe else ""
+        self.edge_value.setText(f"{approximate}{true_count:+.1f}")
+        self.edge_value.setStyleSheet(f"color: {edge_color};")
+        self.edge_value.setToolTip("Dołączono w trakcie buta, więc przewaga jest zaniżona." if self.started_mid_shoe else "")
+        self.bet_value.setText(f"×{bet_units(true_count)}")
+        self.show_round_cards()
+        self.show_shoe()
         tally = self.tally
-        self.mode_pill.setText("GRASZ" if self.betting else "OBSERWUJESZ")
-        self.mode_pill.setStyleSheet("background: #1d3a5c; color: #8cc4ff;" if self.betting else "")
-        self.stat_labels[WIN].setText(f"Wygrane {tally[WIN] + tally[BLACKJACK]}")
-        self.stat_labels[LOSS].setText(f"Przegrane {tally[LOSS]}")
-        self.stat_labels[PUSH].setText(f"Remisy {tally[PUSH]}")
-        details = [f"Policzone w rundzie ({len(self.round_cards)}): {' '.join(self.round_cards) or '–'}",
-                   f"Talia {SHOE_COLOR_NAMES.get(self.shoe_color, '?')} · zostało {shoe.cards_left} kart"]
-        if table.dealer[:1] == ["A"] and len(table.dealer) == 1:
-            details.insert(0, f"Ubezpieczenie: {'TAK' if true_count >= INSURANCE_TRUE_COUNT else 'nie'}")
-        self.detail.setText("\n".join(details))
+        slash = f"<span style='color: {IDLE_COLOR}'> / </span>"
+        self.tally_text.setText(f"<span style='color: {POSITIVE}'>{tally[WIN] + tally[BLACKJACK]}</span>{slash}"
+                                f"<span style='color: {NEGATIVE}'>{tally[LOSS]}</span>{slash}"
+                                f"<span style='color: {NEUTRAL}'>{tally[PUSH]}</span>")
 
-        self.note.setText("Dołączono w trakcie talii – przewaga zaniżona" if self.started_mid_shoe else "")
+    def show_shoe(self) -> None:
+        swatch = SHOE_SWATCH_COLORS.get(self.shoe_color, UNKNOWN_SHOE_COLOR)
+        self.shoe_swatch.setStyleSheet(f"background: {swatch};")
+        self.cards_left.setText(f"{self.shoe.cards_left} kart")
+        recent = self.shoe_changed_at is not None and time.monotonic() - self.shoe_changed_at < NEW_SHOE_BADGE_SECONDS
+        self.new_shoe_badge.setVisible(recent)
+
+    def show_round_cards(self) -> None:
+        if self.round_cards == self.shown_round_cards:
+            return
+        self.shown_round_cards = list(self.round_cards)
+        clear_layout(self.round_box)
+        for rank in self.round_cards[:ROUND_CARDS_SHOWN]:
+            self.round_box.addWidget(QLabel(rank, objectName="miniCard"))
+        hidden = len(self.round_cards) - ROUND_CARDS_SHOWN
+        if hidden > 0:
+            self.round_box.addWidget(QLabel(f"+{hidden}", objectName="statLabel"))
+        if not self.round_cards:
+            self.round_box.addWidget(QLabel("–", objectName="empty"))
+
+    def contextMenuEvent(self, event) -> None:
+        menu = QMenu(self)
+        menu.setStyleSheet(self.style_sheet)
+        menu.addAction("Nowa talia (licz od zera)", self.new_shoe)
+        menu.addSeparator()
+        menu.addAction("Zamknij Czarnego Jacka", QApplication.quit)
+        menu.exec(event.globalPos())
 
     def mousePressEvent(self, event) -> None:
         self.drag_start = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
